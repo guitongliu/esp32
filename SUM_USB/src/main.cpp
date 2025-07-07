@@ -71,13 +71,28 @@ static uint32_t frames_committed = 0;
 static uint32_t last_commit_print_micros = 0;
 static uint32_t data_processed_count[NODE_MAXCOUNT] = {0}; // 新增：统计每个节点的数据包处理次数
 
+// 动态节点管理和功耗优化变量
+static uint8_t connected_node_count = 0; // 当前连接的节点数量
+static uint64_t last_node_data_time = 0; // 上次收到任意节点数据的时间
+static uint64_t last_collection_start_time = 0; // 开始收集当前数据帧的时间
 
 // 全局变量，或作为 sendTimerCallback 的静态变量
 static uint64_t last_commit_time = 0;
 // static std::bitset<NODE_MAXCOUNT> last_committed_flags; // 记录上次提交时的flags，避免重复提交相同的部分数据
-const uint64_t FORCE_COMMIT_TIMEOUT_US = 5000; // 5ms，如果5ms内没有自然凑齐，就考虑强制处理
+
+// 动态超时配置（基于连接节点数的功耗优化）
+const uint64_t BASE_COMMIT_TIMEOUT_US = 2000; // 基础超时2ms
+const uint64_t MAX_COMMIT_TIMEOUT_US = 8000;  // 最大超时8ms
 
 uint64_t last_successful_process_time = 0;
+
+// 获取动态提交超时时间（基于连接节点数的功耗优化）
+uint64_t getDynamicCommitTimeout() {
+    if (connected_node_count == 0) return MAX_COMMIT_TIMEOUT_US;
+    if (connected_node_count >= NODE_EXPECTED) return BASE_COMMIT_TIMEOUT_US;
+    // 节点数越少，超时越长，以节省功耗
+    return BASE_COMMIT_TIMEOUT_US + (NODE_EXPECTED - connected_node_count) * 1500; // 每少一个节点增加1.5ms超时
+}
 
 // Helper function to check if buffer is full
 bool isTimeSlotBufferFull() {
@@ -184,54 +199,56 @@ void sendCombinedData() {
 }
 
 
-// sendTimerCallback 现在只负责触发 sendCombinedData
+// sendTimerCallback 现在负责触发 sendCombinedData 和 超时数据提交
 void sendTimerCallback(void* arg) {
-    // uint32_t cb_start_micros = micros();
+    // 检查是否需要基于超时强制提交 activeCollectionSlotData
+    uint64_t current_time = esp_timer_get_time();
+    bool should_force_commit = false;
+    
+    if (activeCollectionSlotData.readyFlags.any()) {
+        uint64_t timeout_threshold = getDynamicCommitTimeout();
+        
+        // 如果收集开始后超过动态超时时间，或者距离上次数据接收超过超时时间
+        if ((current_time - last_collection_start_time > timeout_threshold) ||
+            (current_time - last_node_data_time > timeout_threshold)) {
+            should_force_commit = true;
+        }
+    }
+    
+    // 强制提交超时的数据
+    if (should_force_commit) {
+        uint8_t nextWriteSlotCandidate = (currentWriteSlot + 1) % BUFFER_SLOTS;
+        if (nextWriteSlotCandidate == currentReadSlot) {
+            // 缓冲区满，丢弃最老的数据
+            timeSlots[currentReadSlot].readyFlags.reset();
+            currentReadSlot = (currentReadSlot + 1) % BUFFER_SLOTS;
+        }
+        
+        timeSlots[currentWriteSlot] = activeCollectionSlotData;
+        currentWriteSlot = nextWriteSlotCandidate;
+        activeCollectionSlotData.readyFlags.reset();
+        frames_committed++;
+        last_commit_time = current_time;
+        
+        // Serial.printf("TIMER: Force committed partial frame (%d nodes) due to timeout\n", 
+        //               timeSlots[(currentWriteSlot - 1 + BUFFER_SLOTS) % BUFFER_SLOTS].readyFlags.count());
+    }
 
-    // // 检查是否需要基于超时强制处理 activeCollectionSlotData
-    // // (这个逻辑也可以放在 processData 中，但放在定时器里有周期性检查的意味)
-    // bool collection_timeout = false;
-    // if (activeCollectionSlotData.readyFlags.any() && // 如果当前正在收集数据
-    //     (micros() - last_successful_process_time > FORCE_COMMIT_TIMEOUT_US)) { // last_successful_process_time 需要在 processData 中每次收到数据时更新
-    //     // 或者更简单：如果 activeCollectionSlotData.readyFlags 很久没变过了，或者上次提交后很久了
-    //     // 这里的超时逻辑需要仔细设计，避免与 processData 中的提交竞争
-    //     // 一个更稳妥的超时：在 processData 中，如果一个新包来了，发现上一个包（任意节点）是很久以前的，
-    //     // 并且 activeCollectionSlotData 还没有满，可以认为之前的收集“停滞”了。
-
-    //     // 简化版超时：如果 activeCollectionSlotData 中有数据，并且距离上次成功提交已经很久了
-    //     // if (activeCollectionSlotData.readyFlags.any() && (micros() - last_commit_time > FORCE_COMMIT_TIMEOUT_US)) {
-    //     //      Serial.printf("TIMER: Collection timeout suspected. Flags: %s. Forcing commit/reset.\n", activeCollectionSlotData.readyFlags.to_string().c_str());
-    //     //      // 决定是提交部分，还是直接reset
-    //     //      // 提交部分（示例）：
-    //     //      if (activeCollectionSlotData.readyFlags.count() >= 2) { // 至少有2个节点
-    //     //         uint8_t nextWriteSlotCandidate = (currentWriteSlot + 1) % BUFFER_SLOTS;
-    //     //         if (nextWriteSlotCandidate == currentReadSlot) { /* Buffer full handling */ }
-    //     //         timeSlots[currentWriteSlot] = activeCollectionSlotData;
-    //     //         // 注意：这里提交的是 activeCollectionSlotData，它的 readyFlags 可能不是全1
-    //     //         // sendCombinedData 需要能处理这种情况，或者在这里修改 readyFlags 只保留真实有效的
-    //     //         currentWriteSlot = nextWriteSlotCandidate;
-    //     //         frames_committed++; // 算作一次提交
-    //     //      }
-    //     //      activeCollectionSlotData.readyFlags.reset();
-    //     //      last_commit_time = micros(); // 更新提交时间，即使是部分提交或仅重置
-    //     // }
-    // }
-
-
-    // --- 原有的发送逻辑 ---
-    sendCombinedData(); // 尝试从 timeSlots 发送
-
-    // uint32_t cb_end_micros = micros();
-    // uint32_t cb_duration = cb_end_micros - cb_start_micros;
-    // if (cb_duration > 950) { // 略小于1000，留点余量
-    //     Serial.printf("WARN: sendTimerCallback took %lu us!\n", cb_duration);
-    // }
+    // 发送缓冲区中的数据
+    sendCombinedData();
 }
 
 void processData(uint8_t nodeID, uint8_t* data) {
   if (nodeID >= NODE_MAXCOUNT) return;
 
-  last_successful_process_time = micros(); // 或者 esp_timer_get_time()，保持一致性
+  uint64_t current_time = esp_timer_get_time();
+  last_successful_process_time = current_time;
+  last_node_data_time = current_time;
+
+  // 如果这是新数据帧的开始，记录开始时间
+  if (activeCollectionSlotData.readyFlags.none()) {
+      last_collection_start_time = current_time;
+  }
 
   // 写入当前的活动收集槽位
   memcpy(&activeCollectionSlotData.nodes[nodeID], data, sizeof(NodeData));
@@ -241,41 +258,52 @@ void processData(uint8_t nodeID, uint8_t* data) {
   // ***** 详细打印标志位变化 *****
   // Serial.printf("PData: Node %d arrived. Flags: %s\n", nodeID, activeCollectionSlotData.readyFlags.to_string().c_str());
 
-  // 检查是否所有节点的数据都已收集完毕
-    if (activeCollectionSlotData.readyFlags.count() == NODE_EXPECTED) { // 或者 .all()
-        // 所有节点数据都已到达，将 activeCollectionSlotData 提交到发送环形缓冲区
-        uint8_t nextWriteSlotCandidate = (currentWriteSlot + 1) % BUFFER_SLOTS;
+  // 智能提交策略：
+  // 1. 如果收到了所有预期节点的数据，立即提交
+  // 2. 如果收到的节点数达到当前连接节点数，也立即提交（避免等待未连接的节点）
+  bool should_commit_now = false;
+  
+  if (activeCollectionSlotData.readyFlags.count() == NODE_EXPECTED) {
+      should_commit_now = true; // 所有预期节点都到达
+  } else if (connected_node_count > 0 && 
+             activeCollectionSlotData.readyFlags.count() >= connected_node_count) {
+      should_commit_now = true; // 所有连接的节点都到达
+  }
+  
+  if (should_commit_now) {
+      uint8_t nextWriteSlotCandidate = (currentWriteSlot + 1) % BUFFER_SLOTS;
 
-        if (nextWriteSlotCandidate == currentReadSlot) {
-            // 缓冲区满！丢弃最老的数据帧来腾出空间
-            // Serial.printf("CRITICAL: TimeSlot buffer full! WriteSlot: %d, ReadSlot: %d. Oldest data in slot %d dropped.\n", currentWriteSlot, currentReadSlot, currentReadSlot);
-            timeSlots[currentReadSlot].readyFlags.reset(); // 清理被覆盖的槽位
-            currentReadSlot = (currentReadSlot + 1) % BUFFER_SLOTS;
-            // 注意：这里覆盖了最老的数据。如果这对你的应用不可接受，需要其他策略。
-        }
-
-        timeSlots[currentWriteSlot] = activeCollectionSlotData; // 结构体赋值
-        // Serial.printf("DEBUG: Committed complete frame to slot %d. Flags: %s\n", currentWriteSlot, activeCollectionSlotData.readyFlags.to_string().c_str());
-        currentWriteSlot = nextWriteSlotCandidate;
-
-        // 清空 activeCollectionSlotData 的标志，准备接收下一组数据
-        activeCollectionSlotData.readyFlags.reset();
-        frames_committed++;
-    }
-
-
-    if (micros() - last_commit_print_micros >= 1000000) { // 每秒打印
-      Serial.printf("Frames committed to buffer in 1s: %u. ", frames_committed);
-      Serial.printf("ActiveCollectionFlags: %s. ", activeCollectionSlotData.readyFlags.to_string().c_str());
-      Serial.print("Node data counts: ");
-      for(int i=0; i<NODE_MAXCOUNT; i++) {
-        Serial.printf("[%d]:%u ", i, data_processed_count[i]);
-        data_processed_count[i] = 0; // 重置计数器
+      if (nextWriteSlotCandidate == currentReadSlot) {
+          // 缓冲区满！丢弃最老的数据帧来腾出空间
+          // Serial.printf("CRITICAL: TimeSlot buffer full! WriteSlot: %d, ReadSlot: %d. Oldest data in slot %d dropped.\n", currentWriteSlot, currentReadSlot, currentReadSlot);
+          timeSlots[currentReadSlot].readyFlags.reset(); // 清理被覆盖的槽位
+          currentReadSlot = (currentReadSlot + 1) % BUFFER_SLOTS;
       }
-      Serial.println();
-      frames_committed = 0;
-      last_commit_print_micros = micros();
+
+      timeSlots[currentWriteSlot] = activeCollectionSlotData; // 结构体赋值
+      // Serial.printf("DEBUG: Committed frame to slot %d. Flags: %s (%d/%d nodes)\n", 
+      //               currentWriteSlot, activeCollectionSlotData.readyFlags.to_string().c_str(),
+      //               activeCollectionSlotData.readyFlags.count(), connected_node_count);
+      currentWriteSlot = nextWriteSlotCandidate;
+
+      // 清空 activeCollectionSlotData 的标志，准备接收下一组数据
+      activeCollectionSlotData.readyFlags.reset();
+      frames_committed++;
+      last_commit_time = current_time;
+  }
+
+  if (micros() - last_commit_print_micros >= 1000000) { // 每秒打印
+    Serial.printf("Frames committed: %u, Connected nodes: %d, ActiveFlags: %s. ", 
+                  frames_committed, connected_node_count, activeCollectionSlotData.readyFlags.to_string().c_str());
+    Serial.print("Node data counts: ");
+    for(int i=0; i<NODE_MAXCOUNT; i++) {
+      Serial.printf("[%d]:%u ", i, data_processed_count[i]);
+      data_processed_count[i] = 0; // 重置计数器
     }
+    Serial.println();
+    frames_committed = 0;
+    last_commit_print_micros = micros();
+  }
   // Serial.printf("Node %d data received. Active flags: %s\n", nodeID, activeCollectionSlotData.readyFlags.to_string().c_str());
 }
 
@@ -317,6 +345,9 @@ void taskNetwork(void *pvParam) {
           clients[i].stop();
       }
     }
+
+    // 更新全局连接节点数统计（用于功耗优化）
+    connected_node_count = connected_clients;
 
     tv.tv_sec = 0;
     tv.tv_usec = 10; // 等待100微秒
@@ -458,8 +489,13 @@ void setup() {
   // 初始化 USB CDC (Serial)，波特率参数对于USB是虚拟的，但通常需要一个
   Serial.begin(115200); // 或者使用任意值，如 460800
 
+  // 初始化时间变量
+  uint64_t current_time = esp_timer_get_time();
+  last_node_data_time = current_time;
+  last_collection_start_time = current_time;
+  last_commit_time = current_time;
 
-    // 初始化 activeCollectionSlotData
+  // 初始化 activeCollectionSlotData
   activeCollectionSlotData.readyFlags.reset();
   // 确保所有 timeSlots 初始都是空的
   for (int i = 0; i < BUFFER_SLOTS; ++i) {
