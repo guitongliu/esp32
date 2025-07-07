@@ -104,7 +104,7 @@ void enterLowPowerMode() {
     // --- 配置定时器唤醒 ---
     // 参数是唤醒时间，单位是微秒 (microseconds)
     // 20 秒 = 20 * 1,000,000 微秒
-    uint64_t sleepTimeUs = 30 * 1000000;
+    uint64_t sleepTimeUs = 5 * 1000000;
     Serial.printf("Enabling timer wakeup for %llu us (%d seconds).\n", sleepTimeUs, (int)(sleepTimeUs / 1000000));
     esp_sleep_enable_timer_wakeup(sleepTimeUs);
     // ----------------------
