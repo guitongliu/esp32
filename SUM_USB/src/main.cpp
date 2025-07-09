@@ -8,7 +8,7 @@
 // #define SERIAL_BAUDRATE 460800  // USB CDC 不使用传统的波特率概念，此定义可以保留用于 Serial.begin() 参数，但实际速度由USB决定
 #define DATA_PORT 12345
 #define BUFFER_SLOTS 10          // 适当增加缓冲槽数量
-#define NODE_EXPECTED 4
+#define NODE_EXPECTED 4          // 预期节点数（用于参考，实际支持1-4个节点动态连接）
 // #define PACKET_SIZE 147         // 2+1+144字节
 #define PACKET_SIZE 51         // 2+1+48字节
 #define PACKET_PAYLOAD_SIZE 48   // NodeData的实际大小
@@ -89,9 +89,10 @@ uint64_t last_successful_process_time = 0;
 // 获取动态提交超时时间（基于连接节点数的功耗优化）
 uint64_t getDynamicCommitTimeout() {
     if (connected_node_count == 0) return MAX_COMMIT_TIMEOUT_US;
-    if (connected_node_count >= NODE_EXPECTED) return BASE_COMMIT_TIMEOUT_US;
+    if (connected_node_count >= NODE_MAXCOUNT) return BASE_COMMIT_TIMEOUT_US;
     // 节点数越少，超时越长，以节省功耗
-    return BASE_COMMIT_TIMEOUT_US + (NODE_EXPECTED - connected_node_count) * 1500; // 每少一个节点增加1.5ms超时
+    // 使用实际最大节点数而不是固定的预期节点数
+    return BASE_COMMIT_TIMEOUT_US + (NODE_MAXCOUNT - connected_node_count) * 1500; // 每少一个节点增加1.5ms超时
 }
 
 // Helper function to check if buffer is full
@@ -144,10 +145,9 @@ void sendCombinedData() {
   //               currentReadSlot, slotToSend.readyFlags.to_string().c_str(),
   //               slotToSend.readyFlags.count(), NODE_EXPECTED);
 
-  // 只有当前槽位准备好的节点数量达到预期才发送
-  // 如果希望即使不完整也发送，可以修改或移除这个条件
-  // if(slotToSend.readyFlags.count() >= NODE_EXPECTED) { // 或者修改为 slotToSend.readyFlags.any() 如果希望发送任何收到的数据
-  if(slotToSend.readyFlags.any()) { // <--- 修改在这里！
+  // 只要有任意节点的数据就发送（支持1-4个节点动态连接）
+  // if(slotToSend.readyFlags.count() >= NODE_EXPECTED) { // 旧逻辑：等待所有预期节点
+  if(slotToSend.readyFlags.any()) { // 新逻辑：有任意节点数据就发送
     size_t txIndex = 0;
     // 包头: 0xAA, 0x55, 节点数量, 数据大小
     uint8_t header[4] = {0xAA, 0x55,
@@ -259,15 +259,15 @@ void processData(uint8_t nodeID, uint8_t* data) {
   // Serial.printf("PData: Node %d arrived. Flags: %s\n", nodeID, activeCollectionSlotData.readyFlags.to_string().c_str());
 
   // 智能提交策略：
-  // 1. 如果收到了所有预期节点的数据，立即提交
-  // 2. 如果收到的节点数达到当前连接节点数，也立即提交（避免等待未连接的节点）
+  // 1. 如果收到了所有连接节点的数据，立即提交
+  // 2. 支持任意数量的节点连接，不强制要求4个节点
   bool should_commit_now = false;
   
-  if (activeCollectionSlotData.readyFlags.count() == NODE_EXPECTED) {
-      should_commit_now = true; // 所有预期节点都到达
-  } else if (connected_node_count > 0 && 
-             activeCollectionSlotData.readyFlags.count() >= connected_node_count) {
+  if (connected_node_count > 0 && 
+      activeCollectionSlotData.readyFlags.count() >= connected_node_count) {
       should_commit_now = true; // 所有连接的节点都到达
+  } else if (connected_node_count == 0 && activeCollectionSlotData.readyFlags.any()) {
+      should_commit_now = true; // 即使没有连接统计，只要有数据就提交（兼容性处理）
   }
   
   if (should_commit_now) {
@@ -300,6 +300,10 @@ void processData(uint8_t nodeID, uint8_t* data) {
       Serial.printf("[%d]:%u ", i, data_processed_count[i]);
       data_processed_count[i] = 0; // 重置计数器
     }
+    Serial.printf("| Connection status: ");
+    for(int i=0; i<NODE_MAXCOUNT; i++) {
+      Serial.printf("[%d]:%s ", i, clients[i].connected() ? "C" : "D");
+    }
     Serial.println();
     frames_committed = 0;
     last_commit_print_micros = micros();
@@ -322,6 +326,8 @@ void taskNetwork(void *pvParam) {
           if(clients[i].connected()) clients[i].stop();
           clients[i] = newClient;
           // clients[i].setNoDelay(true);
+          // 清理该节点的网络缓冲区，为新连接做准备
+          netBufLen[i] = 0;
           Serial.printf("Client %d connected from %s\n", i, ip.toString().c_str());
           break;
         }
@@ -405,11 +411,15 @@ void taskNetwork(void *pvParam) {
       }
     }
 
-    // 检查连接是否断开
+    // 检查连接是否断开，更准确的断开检测
     for(int i=0; i<NODE_MAXCOUNT; i++){
-        if(clients[i].connected() && clients[i].available() <= 0 && clients[i].fd() == -1) {
-            Serial.printf("Client %d disconnected\n", i);
-            clients[i].stop();
+        if(clients[i]) {
+            if(!clients[i].connected() || clients[i].fd() == -1) {
+                Serial.printf("Client %d disconnected\n", i);
+                clients[i].stop();
+                // 清理该节点的网络缓冲区
+                netBufLen[i] = 0;
+            }
         }
     }
 

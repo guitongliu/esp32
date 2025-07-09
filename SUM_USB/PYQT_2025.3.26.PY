@@ -79,8 +79,8 @@ NODE_COLS = 2  # 期望将节点分为几列显示
 # sized based on node_expected.
 # channelValues[i] stores EMG channel 0 data for node i
 
-deque_maxlen_emg = maxLen * 2  # 保留比显示内容稍多一些
-deque_maxlen_acc = maxLen_acc * 2  # 对于ACC也一样
+deque_maxlen_emg = maxLen + 100  # 减小缓冲区，降低延迟（原来是 maxLen * 2）
+deque_maxlen_acc = maxLen_acc + 50  # 对于ACC也一样（原来是 maxLen_acc * 2）
 
 # channelValues = [[] for _ in range(node_expected)]
 # # channelValues_acc[i*3 + axis] stores ACCel 1 axis (0=X, 1=Y, 2=Z) data for node i
@@ -367,8 +367,8 @@ def GetValue():
 
         # === Packet is valid, process data ===
         with data_lock:
-            # Only process if we received the expected number of nodes
-            if node_count == node_expected:
+            # Process data for any valid number of nodes (1 to node_expected)
+            if node_count > 0 and node_count <= node_expected:
                 ptr = 4  # Start processing after the 4-byte header
 
                 # **** MODIFICATION START ****
@@ -410,6 +410,7 @@ def GetValue():
 
                     # 解析EMG数据
                     emg_values = struct.unpack(f"{3 * CHANNEL_SIZE}B", node_data[:3 * CHANNEL_SIZE])
+                    current_time = time.time()  # 获取当前时间戳
                     for sample in range(CHANNEL_SIZE):
                         byte_idx = sample * 3
                         ch_val = (emg_values[byte_idx] << 16 |
@@ -423,6 +424,9 @@ def GetValue():
                         channelValues[node_id].append(ch_val)
                         current_packet_emg_samples_for_record[node_id, sample] = ch_val  # 存储EMG0用于记录
                         # print(channelValues)
+                    
+                    # 更新该节点的最后数据接收时间
+                    last_data_time[node_id] = current_time
 
                     # Parse Accelerometer data (6 axes: 2 accelerometers?)
                     # Ensure node_data has enough bytes for ACC after EMG
@@ -443,6 +447,10 @@ def GetValue():
                         current_packet_acc_samples_for_record[node_id * 3 + 0, i] = acc_x
                         current_packet_acc_samples_for_record[node_id * 3 + 1, i] = acc_y
                         current_packet_acc_samples_for_record[node_id * 3 + 2, i] = acc_z
+                    
+                    # 更新该节点所有ACC通道的最后数据接收时间
+                    for j in range(3):
+                        last_data_time_acc[node_id * 3 + j] = current_time
 
                 # **** MODIFICATION START ****
                 # 如果记录标志为1，将处理好的当前数据包数据放入记录队列
@@ -454,6 +462,22 @@ def GetValue():
                     except queue.Full:
                         print("记录队列已满！GetValue数据丢失。")
                 # **** MODIFICATION END ****
+                
+                # 打印处理的节点信息（减少调试信息频率）
+                if len(received_nodes) < node_expected:
+                    # 使用静态变量来控制打印频率
+                    if not hasattr(GetValue, '_partial_node_counter'):
+                        GetValue._partial_node_counter = 0
+                    GetValue._partial_node_counter += 1
+                    
+                    # 每100个数据包打印一次部分节点信息
+                    if GetValue._partial_node_counter % 100 == 1:
+                        print(f"处理了部分节点数据: {len(received_nodes)}/{node_expected} 节点, 节点ID: {received_nodes}")
+            else:
+                if node_count > node_expected:
+                    print(f"警告: 接收到过多节点数据 ({node_count} > {node_expected})，数据包被忽略")
+                elif node_count == 0:
+                    print("警告: 接收到空数据包 (node_count = 0)")
 
                 # --- Manually enforce list size limit AFTER appending ---
                 # This is necessary if not using deque with maxlen
@@ -635,16 +659,22 @@ class MainWindow(QtWidgets.QWidget):
 
         # --- Timer for Plot Updates ---
         # Define the number of new samples to consume from the data lists per update tick.
-        self.process_chunk_size_emg = 400  # Consume up to 100 EMG samples per list per tick
-        self.process_chunk_size_acc = 80  # Consume up to 50 ACC samples per list per tick
+        # 减小处理块大小以降低延迟
+        self.process_chunk_size_emg = 50  # 减少到50个EMG样本 (原来是400)
+        self.process_chunk_size_acc = 10  # 减少到10个ACC样本 (原来是80)
         # Note: Data acquisition adds one EMG sample and one ACC sample (X, Y, Z) per node per packet.
         # So these chunk sizes refer to number of *packets* to process per update.
-        # Let's use a single chunk size as data comes in packets.
+        # 更小的块大小可以减少延迟，但可能稍微增加CPU使用率
 
-        # 启动定时器，每隔20ms通知刷新一次数据
+        # 启动定时器，每隔15ms通知刷新一次数据
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.UpdateData)  # 调用UpdateData函数
-        self.timer.start(20)  # 20ms更新一下画图数据 (50 Hz)
+        self.timer.start(15)  # 15ms更新一下画图数据 (约67 Hz)，提高响应性
+        
+        # 添加专用于状态检查的定时器，确保即使无数据流时也能实时更新状态
+        self.status_timer = QtCore.QTimer()
+        self.status_timer.timeout.connect(self.update_plot_styles_based_on_activity)
+        self.status_timer.start(100)  # 每100ms检查一次状态，提供快速响应
 
     def StartBotton(self):
         print("Start button clicked")
@@ -735,71 +765,67 @@ class MainWindow(QtWidgets.QWidget):
 
         with data_lock:
 
-            # all_channel_lists = channelValues + channelValues_acc
-            # min_len = min(len(ch) for ch in all_channel_lists) if all_channel_lists else 0
-            # min_len_emg = min(len(ch) for ch in channelValues) if all_channel_lists else 0
+            # 检查每个节点的数据可用性
+            available_emg_lens = [len(d) for d in channelValues]
+            available_acc_lens = [len(d) for d in channelValues_acc]
+            
+            # 改进：不等待所有节点，只要有任何节点有数据就可以处理
+            # 对于EMG数据，找到有数据的节点中的最大可用数据量
+            max_available_emg = max(available_emg_lens) if available_emg_lens else 0
+            # 积极处理策略：即使只有1个样本也处理，但限制最大处理数量避免延迟
+            num_to_pop_emg = min(max_available_emg, samples_to_process_emg) if max_available_emg > 0 else 0
+            
+            # 对于ACC数据，同样处理
+            max_available_acc = max(available_acc_lens) if available_acc_lens else 0
+            num_to_pop_acc = min(max_available_acc, samples_to_process_acc) if max_available_acc > 0 else 0
+            
+            # 如果数据很少，至少处理1个样本以保持实时性
+            if max_available_emg > 0 and num_to_pop_emg == 0:
+                num_to_pop_emg = 1
+            if max_available_acc > 0 and num_to_pop_acc == 0:
+                num_to_pop_acc = 1
 
-            min_len_emg = min(len(d) for d in channelValues) if channelValues else 0
-            num_to_pop_emg = min(min_len_emg, samples_to_process_emg)
-            actual_samples_to_process_emg = num_to_pop_emg
-            # print(actual_samples_to_process_emg)
-
-            min_len_acc = min(len(d) for d in channelValues_acc) if channelValues_acc else 0
-            num_to_pop_acc = min(min_len_acc, samples_to_process_acc)
-            actual_samples_to_process = num_to_pop_acc
-            # print(actual_samples_to_process)
-
-            # actual_samples_to_process = min(samples_to_process_acc, min_len)
-            # actual_samples_to_process_emg = min(samples_to_process_emg, min_len_emg)
-
-            if actual_samples_to_process_emg > 0:
+            if num_to_pop_emg > 0:
                 # === Process EMG Data ===
-                # # Extract the chunk from the start of each EMG list
-                # emg_chunk_list = [ch[:actual_samples_to_process_emg] for ch in channelValues]
-                # # Convert to numpy array (transpose so each row is a channel, columns are samples)
-                # processed_emg_chunk = np.array(emg_chunk_list, dtype=np.int32)
+                emg_nodes_with_data = []  # 记录哪些节点有新数据
                 for i in range(node_expected):
-                    for _ in range(num_to_pop_emg):
-                        emg_data_for_plot_list[i].append(channelValues[i].popleft())
-                emg_data_for_record_np = np.array(emg_data_for_plot_list, dtype=np.int32)
+                    # 只有当该节点有足够数据时才提取
+                    if len(channelValues[i]) >= num_to_pop_emg:
+                        for _ in range(num_to_pop_emg):
+                            emg_data_for_plot_list[i].append(channelValues[i].popleft())
+                        emg_nodes_with_data.append(i)
+                
+                # 只更新有新数据的节点，不填充零值
+                if emg_nodes_with_data:
+                    # 只为有数据的节点更新显示缓冲区
+                    for node_idx in emg_nodes_with_data:
+                        if len(emg_data_for_plot_list[node_idx]) > 0:
+                            # 将新数据添加到该节点的显示缓冲区
+                            new_data = np.array(emg_data_for_plot_list[node_idx], dtype=np.int32)
+                            # Update the EMG plotting buffer for this specific node (rolling)
+                            showdata[node_idx, :] = np.roll(showdata[node_idx, :], -len(new_data))
+                            showdata[node_idx, -len(new_data):] = new_data
 
-                # if RecordFlag == 1:
-                #     Record(processed_emg_chunk)  # 存储数据
-
-                # Delete processed samples from the lists (inefficient for lists, but size limited now)
-                # for ch in channelValues:
-                #     del ch[:actual_samples_to_process_emg]
-
-                # Update the EMG plotting buffer (rolling)
-                showdata = np.roll(showdata, -actual_samples_to_process_emg, axis=1)
-                showdata[:, -actual_samples_to_process_emg:] = emg_data_for_record_np[:, :actual_samples_to_process_emg]
-
-            if actual_samples_to_process > 0:
-
-                # # === Process ACC Data ===
-                # # Extract the chunk from the start of each ACC list
-                # acc_chunk_list = [ch[:actual_samples_to_process] for ch in channelValues_acc]
-                # # Convert to numpy array (transpose so each row is an acc channel, columns are samples)
-                # processed_acc_chunk = np.array(acc_chunk_list, dtype=np.float32)
+            if num_to_pop_acc > 0:
+                # === Process ACC Data ===
+                acc_channels_with_data = []  # 记录哪些ACC通道有新数据
                 for i in range(node_expected * 3):
-                    for _ in range(num_to_pop_acc):
-                        acc_data_for_plot_list[i].append(channelValues_acc[i].popleft())
-                acc_data_for_record_np = np.array(acc_data_for_plot_list, dtype=np.float32)
-                #
-                # if RecordFlag == 1:
-                #     Record(processed_acc_chunk)  # 存储数据
-
-                # Delete processed samples from the lists
-                # for ch in channelValues_acc:
-                #     del ch[:actual_samples_to_process]
-
-                # Update the ACC plotting buffer (rolling)
-                showdata_acc = np.roll(showdata_acc, -actual_samples_to_process, axis=1)
-                showdata_acc[:, -actual_samples_to_process:] = acc_data_for_record_np[:, :actual_samples_to_process]
-
-                # === Record Data (assuming chunks are aligned) ===
-                # You need to combine processed_emg_chunk and processed_acc_chunk for recording
-                pass  # Data processed and added to showdata buffers
+                    # 只有当该ACC通道有足够数据时才提取
+                    if len(channelValues_acc[i]) >= num_to_pop_acc:
+                        for _ in range(num_to_pop_acc):
+                            acc_data_for_plot_list[i].append(channelValues_acc[i].popleft())
+                        acc_channels_with_data.append(i)
+                
+                # 只更新有新数据的通道，不填充零值
+                if acc_channels_with_data:
+                    # 只为有数据的通道更新显示缓冲区
+                    for channel_idx in acc_channels_with_data:
+                        if len(acc_data_for_plot_list[channel_idx]) > 0:
+                            # 将新数据添加到该通道的显示缓冲区
+                            new_data = np.array(acc_data_for_plot_list[channel_idx], dtype=np.float32)
+                            # Update the ACC plotting buffer for this specific channel (rolling)
+                            showdata_acc[channel_idx, :] = np.roll(showdata_acc[channel_idx, :], -len(new_data))
+                            showdata_acc[channel_idx, -len(new_data):] = new_data
 
 
         for i in range(node_expected):
@@ -807,10 +833,40 @@ class MainWindow(QtWidgets.QWidget):
             for j in range(3):
                 plot_idx = i * 4 + j + 1
                 self.curves[plot_idx].setData(showdata_acc[j + i * 3, :])
-        #
-        # for i in range(node_expected * 3):
-        #     plot_idx = node_expected + i
-        #     self.curves[plot_idx].setData(showdata_acc[i, :])
+        
+        # 每隔一段时间更新窗口标题显示活跃节点数（避免过于频繁）
+        if hasattr(self, '_title_update_counter'):
+            self._title_update_counter += 1
+        else:
+            self._title_update_counter = 0
+            
+        # 更频繁地更新线条样式以实现实时状态指示
+        if self._title_update_counter % 5 == 0:  # 每5次更新（约75ms）更新一次线条样式
+            self.update_plot_styles_based_on_activity()
+            
+        if self._title_update_counter % 20 == 0:  # 每20次更新（约0.3秒）更新一次标题
+            self.update_window_title_with_active_nodes()
+
+        # 添加调试信息（可选）
+        if hasattr(self, '_debug_counter'):
+            self._debug_counter += 1
+        else:
+            self._debug_counter = 0
+        
+        # 每100次更新打印一次调试信息
+        if self._debug_counter % 100 == 0:
+            current_time = time.time()
+            active_emg_nodes = sum(1 for i in range(node_expected) 
+                                 if (current_time - last_data_time[i]) <= ACTIVITY_TIMEOUT)
+            active_acc_channels = sum(1 for i in range(node_expected * 3) 
+                                    if (current_time - last_data_time_acc[i]) <= ACTIVITY_TIMEOUT)
+            active_acc_nodes = active_acc_channels // 3  # 每个节点有3个ACC通道
+            
+            if active_emg_nodes > 0 or active_acc_nodes > 0:
+                emg_processed = num_to_pop_emg if 'num_to_pop_emg' in locals() and num_to_pop_emg > 0 else 0
+                acc_processed = num_to_pop_acc if 'num_to_pop_acc' in locals() and num_to_pop_acc > 0 else 0
+                print(f"调试: EMG活跃节点={active_emg_nodes}, ACC活跃节点={active_acc_nodes}, "
+                      f"处理EMG={emg_processed}, 处理ACC={acc_processed}")
 
     def closeEvent(self, event):  # **** MOD: 清理关闭 ****
         print("正在关闭应用程序...")
@@ -826,9 +882,89 @@ class MainWindow(QtWidgets.QWidget):
         print("应用程序已关闭。")
         event.accept()
 
+    def update_window_title_with_active_nodes(self):
+        """更新窗口标题以显示当前活跃的节点数"""
+        # 基于最后接收数据的时间来判断节点是否活跃
+        current_time = time.time()
+        active_nodes = 0
+        
+        for i in range(node_expected):
+            # 如果在超时时间内收到过数据，认为节点活跃
+            if current_time - last_data_time[i] <= ACTIVITY_TIMEOUT:
+                active_nodes += 1
+        
+        # 添加更详细的状态信息
+        if active_nodes == 0:
+            self.setWindowTitle(f'肌电和加速度采集系统 (无活跃节点)')
+        elif active_nodes == node_expected:
+            self.setWindowTitle(f'肌电和加速度采集系统 (全部 {node_expected} 节点活跃)')
+        else:
+            self.setWindowTitle(f'肌电和加速度采集系统 ({active_nodes}/{node_expected} 节点活跃)')
+
+    def update_plot_styles_based_on_activity(self):
+        """根据节点活跃状态更新绘图样式"""
+        current_time = time.time()
+        
+        # 调试：跟踪状态变化（可选启用）
+        debug_status = False  # 设置为True以启用调试输出
+        
+        for i in range(node_expected):
+            # 基于最后接收数据的时间判断EMG节点是否活跃
+            emg_is_active = (current_time - last_data_time[i]) <= ACTIVITY_TIMEOUT
+            
+            # 更新EMG绘图样式
+            emg_curve = self.curves[i * 4]
+            if emg_is_active:
+                emg_curve.setPen(pg.mkPen('b', width=1))  # 蓝色细线表示活跃
+            else:
+                emg_curve.setPen(pg.mkPen(color=(100, 100, 100), width=1, style=QtCore.Qt.DashLine))  # 深灰色虚线表示非活跃
+            
+            # 调试输出EMG状态变化
+            if debug_status and hasattr(self, f'_emg_status_{i}'):
+                old_status = getattr(self, f'_emg_status_{i}')
+                if old_status != emg_is_active:
+                    print(f"EMG Node {i} status changed: {'Active' if emg_is_active else 'Inactive'}")
+            if debug_status:
+                setattr(self, f'_emg_status_{i}', emg_is_active)
+            
+            # 更新ACC绘图样式
+            acc_colors = ['r', 'g', 'm']  # 红、绿、品红分别对应X、Y、Z轴
+            for j in range(3):
+                # 基于最后接收数据的时间判断ACC通道是否活跃
+                acc_is_active = (current_time - last_data_time_acc[i * 3 + j]) <= ACTIVITY_TIMEOUT
+                
+                acc_curve = self.curves[i * 4 + j + 1]
+                if acc_is_active:
+                    acc_curve.setPen(pg.mkPen(acc_colors[j], width=1))  # 彩色细线表示活跃
+                else:
+                    acc_curve.setPen(pg.mkPen(color=(100, 100, 100), width=1, style=QtCore.Qt.DashLine))  # 深灰色虚线表示非活跃
+                
+                # 调试输出ACC状态变化
+                if debug_status and hasattr(self, f'_acc_status_{i}_{j}'):
+                    old_status = getattr(self, f'_acc_status_{i}_{j}')
+                    if old_status != acc_is_active:
+                        print(f"ACC Node {i} Channel {j} status changed: {'Active' if acc_is_active else 'Inactive'}")
+                if debug_status:
+                    setattr(self, f'_acc_status_{i}_{j}', acc_is_active)
+
+# 添加节点活跃状态跟踪
+last_data_time = [0.0] * node_expected  # 记录每个节点最后接收数据的时间
+last_data_time_acc = [0.0] * (node_expected * 3)  # 记录每个ACC通道最后接收数据的时间
+ACTIVITY_TIMEOUT = 0.5  # 0.5秒内没有数据就认为节点不活跃（更快的响应）
+
+def initialize_activity_tracking():
+    """初始化活跃状态跟踪"""
+    global last_data_time, last_data_time_acc
+    # 将所有时间戳初始化为足够久远的时间，这样一开始所有节点都显示为非活跃
+    init_time = 0.0  # 使用0作为初始时间，这样节点一开始就是非活跃状态
+    last_data_time = [init_time] * node_expected
+    last_data_time_acc = [init_time] * (node_expected * 3)
 
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
+
+    # 初始化活跃状态跟踪
+    initialize_activity_tracking()
 
     # Start data reception thread ONLY if serial port was opened successfully
     if ser is not None and ser.isOpen():
