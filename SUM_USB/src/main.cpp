@@ -244,7 +244,7 @@ void processData(uint8_t nodeID, uint8_t* data) {
   // 新增：如果该节点在当前帧已写入，则丢弃本次数据
   if (activeCollectionSlotData.readyFlags.test(nodeID)) {
     // 可选：统计丢弃次数，便于调试
-    Serial.printf("Node %d: Duplicate data in current frame, dropped.\n", nodeID);
+    // Serial.printf("Node %d: Duplicate data in current frame, dropped.\n", nodeID);
     return;
   }
 
@@ -363,7 +363,7 @@ void taskNetwork(void *pvParam) {
     connected_node_count = connected_clients;
 
     tv.tv_sec = 0;
-    tv.tv_usec = 100; // 等待100微秒
+    tv.tv_usec = 10; // 等待10微秒
 
     bool data_processed_in_this_iteration = false;
 
