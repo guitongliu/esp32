@@ -241,6 +241,13 @@ void sendTimerCallback(void* arg) {
 void processData(uint8_t nodeID, uint8_t* data) {
   if (nodeID >= NODE_MAXCOUNT) return;
 
+  // 新增：如果该节点在当前帧已写入，则丢弃本次数据
+  if (activeCollectionSlotData.readyFlags.test(nodeID)) {
+    // 可选：统计丢弃次数，便于调试
+    Serial.printf("Node %d: Duplicate data in current frame, dropped.\n", nodeID);
+    return;
+  }
+
   uint64_t current_time = esp_timer_get_time();
   last_successful_process_time = current_time;
   last_node_data_time = current_time;
