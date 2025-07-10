@@ -325,7 +325,7 @@ void taskNetwork(void *pvParam) {
         if(ip == nodeIPs[i]){
           if(clients[i].connected()) clients[i].stop();
           clients[i] = newClient;
-          // clients[i].setNoDelay(true);
+          clients[i].setNoDelay(true);
           // 清理该节点的网络缓冲区，为新连接做准备
           netBufLen[i] = 0;
           Serial.printf("Client %d connected from %s\n", i, ip.toString().c_str());
@@ -356,7 +356,7 @@ void taskNetwork(void *pvParam) {
     connected_node_count = connected_clients;
 
     tv.tv_sec = 0;
-    tv.tv_usec = 10; // 等待100微秒
+    tv.tv_usec = 100; // 等待100微秒
 
     bool data_processed_in_this_iteration = false;
 
