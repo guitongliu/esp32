@@ -81,7 +81,7 @@ static uint64_t last_commit_time = 0;
 // static std::bitset<NODE_MAXCOUNT> last_committed_flags; // 记录上次提交时的flags，避免重复提交相同的部分数据
 
 // 动态超时配置（基于连接节点数的功耗优化）
-const uint64_t BASE_COMMIT_TIMEOUT_US = 2000; // 基础超时2ms
+const uint64_t BASE_COMMIT_TIMEOUT_US = 3000; // 基础超时3ms
 const uint64_t MAX_COMMIT_TIMEOUT_US = 8000;  // 最大超时8ms
 
 uint64_t last_successful_process_time = 0;
@@ -89,10 +89,10 @@ uint64_t last_successful_process_time = 0;
 // 获取动态提交超时时间（基于连接节点数的功耗优化）
 uint64_t getDynamicCommitTimeout() {
     if (connected_node_count == 0) return MAX_COMMIT_TIMEOUT_US;
-    if (connected_node_count >= NODE_MAXCOUNT) return BASE_COMMIT_TIMEOUT_US;
+    if (connected_node_count <= NODE_MAXCOUNT) return BASE_COMMIT_TIMEOUT_US;
     // 节点数越少，超时越长，以节省功耗
     // 使用实际最大节点数而不是固定的预期节点数
-    return BASE_COMMIT_TIMEOUT_US + (NODE_MAXCOUNT - connected_node_count) * 1500; // 每少一个节点增加1.5ms超时
+    // return BASE_COMMIT_TIMEOUT_US + (NODE_MAXCOUNT - connected_node_count) * 1500; // 每少一个节点增加1.5ms超时
 }
 
 // Helper function to check if buffer is full
@@ -510,6 +510,7 @@ void setup() {
   WiFi.softAP(ssid, password, 6, 0, NODE_MAXCOUNT); // 指定信道6
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
   server.begin();
+  esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT40);
   esp_wifi_set_ps(WIFI_PS_NONE);  // 关闭WiFi休眠
 
   Serial.println("ESP32-S3 AP started with USB CDC"); // 使用USB CDC输出调试信息

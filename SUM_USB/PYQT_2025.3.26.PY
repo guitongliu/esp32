@@ -469,9 +469,9 @@ def GetValue():
                     if not hasattr(GetValue, '_partial_node_counter'):
                         GetValue._partial_node_counter = 0
                     GetValue._partial_node_counter += 1
-                    
-                    # 每100个数据包打印一次部分节点信息
-                    if GetValue._partial_node_counter % 100 == 1:
+
+                    # 每1个数据包打印一次部分节点信息
+                    if GetValue._partial_node_counter % 2 == 1:
                         print(f"处理了部分节点数据: {len(received_nodes)}/{node_expected} 节点, 节点ID: {received_nodes}")
             else:
                 if node_count > node_expected:
