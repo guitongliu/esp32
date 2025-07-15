@@ -89,11 +89,12 @@ uint64_t last_successful_process_time = 0;
 // 获取动态提交超时时间（基于连接节点数的功耗优化）
 uint64_t getDynamicCommitTimeout() {
     if (connected_node_count == 0) return MAX_COMMIT_TIMEOUT_US;
-    if (connected_node_count <= NODE_MAXCOUNT) return BASE_COMMIT_TIMEOUT_US;
+    if (connected_node_count >= NODE_MAXCOUNT) return BASE_COMMIT_TIMEOUT_US;
     // 节点数越少，超时越长，以节省功耗
     // 使用实际最大节点数而不是固定的预期节点数
     // return BASE_COMMIT_TIMEOUT_US + (NODE_MAXCOUNT - connected_node_count) * 1500; // 每少一个节点增加1.5ms超时
-}
+    return BASE_COMMIT_TIMEOUT_US;  // 简化逻辑，直接返回基础超时
+  }
 
 // Helper function to check if buffer is full
 bool isTimeSlotBufferFull() {
@@ -289,6 +290,7 @@ void taskNetwork(void *pvParam) {
   fd_set read_fds;
   int max_fd = 0;
   struct timeval tv;
+  static int last_node_index = 0; // 新增：轮转优先级起始节点
 
   while(1) {
     WiFiClient newClient = server.available();
@@ -329,7 +331,7 @@ void taskNetwork(void *pvParam) {
     connected_node_count = connected_clients;
 
     tv.tv_sec = 0;
-    tv.tv_usec = 10; // 等待10微秒
+    tv.tv_usec = 100; // 等待100微秒
 
     bool data_processed_in_this_iteration = false;
 
@@ -339,7 +341,9 @@ void taskNetwork(void *pvParam) {
       if (ret < 0) {
         // Serial.printf("select error: %d\n", ret); // 频繁打印可能影响性能，仅在调试时开启
       } else if (ret > 0) { // 有数据可读
-        for(int i=0; i<NODE_MAXCOUNT; i++){
+        // 轮转优先级遍历节点
+        for(int offset=0; offset<NODE_MAXCOUNT; offset++){
+          int i = (last_node_index + offset) % NODE_MAXCOUNT;
           if(clients[i].connected()){
             int sock_fd = clients[i].fd();
             if(sock_fd != -1 && FD_ISSET(sock_fd, &read_fds)){
@@ -381,6 +385,8 @@ void taskNetwork(void *pvParam) {
             }
           }
         }
+        // 本轮处理完后，更新last_node_index，下一轮从下一个节点开始
+        last_node_index = (last_node_index + 1) % NODE_MAXCOUNT;
       }
     }
 
