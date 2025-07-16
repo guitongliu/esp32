@@ -81,7 +81,7 @@ static uint64_t last_commit_time = 0;
 // static std::bitset<NODE_MAXCOUNT> last_committed_flags; // 记录上次提交时的flags，避免重复提交相同的部分数据
 
 // 动态超时配置（基于连接节点数的功耗优化）
-const uint64_t BASE_COMMIT_TIMEOUT_US = 3000; // 基础超时3ms
+const uint64_t BASE_COMMIT_TIMEOUT_US = 2000; // 基础超时2ms
 const uint64_t MAX_COMMIT_TIMEOUT_US = 8000;  // 最大超时8ms
 
 uint64_t last_successful_process_time = 0;
@@ -331,7 +331,7 @@ void taskNetwork(void *pvParam) {
     connected_node_count = connected_clients;
 
     tv.tv_sec = 0;
-    tv.tv_usec = 100; // 等待100微秒
+    tv.tv_usec = 1000; // 等待1000微秒
 
     bool data_processed_in_this_iteration = false;
 

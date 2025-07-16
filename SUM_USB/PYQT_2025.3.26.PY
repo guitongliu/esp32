@@ -498,164 +498,348 @@ class MainWindow(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f'肌电和加速度采集系统 ({node_expected} 节点)')  # Update window title
-        self.win = pg.GraphicsLayoutWidget()  # 画图窗口，调用pyqtgraph
-        self.win.ci.layout.setHorizontalSpacing(0)  # Reduce spacing between plots in the GLW grid
-        self.win.ci.layout.setVerticalSpacing(0)  # Reduce spacing between plots in the GLW grid
+        self.setWindowTitle(f'肌电和加速度采集系统 ({node_expected} 节点)')
+        
+        # 获取屏幕分辨率并适应不同屏幕尺寸
+        screen = QtWidgets.QApplication.primaryScreen()
+        screen_geometry = screen.geometry()
+        screen_width = screen_geometry.width()
+        screen_height = screen_geometry.height()
+        
+        # 根据屏幕分辨率动态设置窗口尺寸
+        # 统一初始窗口为较小尺寸，适合大部分屏幕，仍支持自适应缩放
+        window_width = min(1100, screen_width - 100)
+        window_height = min(700, screen_height - 100)
+        if screen_width >= 1920:
+            self.base_font_size = 10
+        elif screen_width >= 1600:
+            self.base_font_size = 8
+        else:
+            self.base_font_size = 7
+        self.setMinimumSize(800, 500)
+        self.resize(window_width, window_height)
+        
+        # 创建绘图窗口
+        self.win = pg.GraphicsLayoutWidget()
+        self.win.setBackground('white')
+        
+        # 设置主布局，根据屏幕宽度调整列比例
+        layout = QtWidgets.QGridLayout()
+        layout.setSpacing(10)
+        
+        # 让左侧宽度自适应，右侧占剩余空间
+        layout.setColumnStretch(0, 2)   # 控制面板列
+        layout.setColumnStretch(1, 8)   # 图表显示列
 
-        layout = QtWidgets.QGridLayout()  # window布局
-        # layout.setSpacing(10)
-        layout.setColumnStretch(0, 1)  # 窗口第一列：放交互按钮
-        layout.setColumnStretch(1, 10)  # 窗口第二列：放绘图区域
+        # --- 控制面板 ---
+        control_panel_widget = QtWidgets.QWidget()
+        control_panel_widget.setStyleSheet(f"""
+            QWidget {{
+                background-color: #f0f0f0;
+                border: 1px solid #cccccc;
+                border-radius: 5px;
+                padding: 4px;
+                font-size: {max(self.base_font_size-1, 6)}pt;
+            }}
+            QPushButton {{
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 3px 8px;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: {max(self.base_font_size-1, 6)}pt;
+                min-height: 22px;
+            }}
+            QPushButton:hover {{
+                background-color: #45a049;
+            }}
+            QPushButton:pressed {{
+                background-color: #3d8b40;
+            }}
+            QLabel {{
+                color: #333333;
+                font-weight: bold;
+                font-size: {max(self.base_font_size-1, 6)}pt;
+            }}
+            QComboBox {{
+                padding: 2px 4px;
+                border: 1px solid #ccc;
+                border-radius: 2px;
+                font-size: {max(self.base_font_size-1, 6)}pt;
+                min-height: 18px;
+            }}
+            QLineEdit {{
+                padding: 2px 4px;
+                border: 1px solid #ccc;
+                border-radius: 2px;
+                font-size: {max(self.base_font_size-1, 6)}pt;
+                min-height: 18px;
+            }}
+            QGroupBox {{
+                font-weight: bold;
+                font-size: {self.base_font_size}pt;
+                margin-top: 5px;
+                padding-top: 7px;
+                border: 2px solid #cccccc;
+                border-radius: 4px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 6px;
+                padding: 0 6px 0 6px;
+            }}
+        """)
+        control_layout = QtWidgets.QVBoxLayout(control_panel_widget)
+        control_layout.setSpacing(10)
+        control_layout.setContentsMargins(5, 5, 5, 5)
 
-        # --- Control Widgets ---
-        StartBotton = QtWidgets.QPushButton("Start")  # 开始接收数据并画图按键
-        StartBotton.clicked.connect(self.StartBotton)  # 连接到StartBotton()回调函数
-        StopBotton = QtWidgets.QPushButton("Stop")  # 停止接收数据并画图按键
+        # 直接使用控件面板，无滚动条，内容自动换行
+        control_panel = control_panel_widget
+        control_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        # 开始/停止按钮
+        start_group = QtWidgets.QGroupBox("数据采集控制")
+        start_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        StartBotton = QtWidgets.QPushButton("开始采集")
+        StartBotton.clicked.connect(self.StartBotton)
+        StopBotton = QtWidgets.QPushButton("停止采集")
         StopBotton.clicked.connect(self.StopBotton)
-        Start_layout = QtWidgets.QHBoxLayout()  # QHBoxlayout()按顺序横向排布按钮
+        StopBotton.setStyleSheet("QPushButton { background-color: #f44336; } QPushButton:hover { background-color: #da190b; }")
+        
+        Start_layout = QtWidgets.QHBoxLayout()
         Start_layout.addWidget(StartBotton)
         Start_layout.addWidget(StopBotton)
-
-        RecordStartBotton = QtWidgets.QPushButton("Start Record")  # 开始记录数据保存到csv
-        RecordStartBotton.clicked.connect(self.RecordStartBotton)  # 绑定回调函数
-        RecordStopBotton = QtWidgets.QPushButton("Stop Record")  # 停止记录数据
+        start_group.setLayout(Start_layout)
+        
+        # 录制控制
+        record_group = QtWidgets.QGroupBox("数据录制控制")
+        record_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        RecordStartBotton = QtWidgets.QPushButton("开始录制")
+        RecordStartBotton.clicked.connect(self.RecordStartBotton)
+        RecordStopBotton = QtWidgets.QPushButton("停止录制")
         RecordStopBotton.clicked.connect(self.RecordStopBotton)
+        RecordStopBotton.setStyleSheet("QPushButton { background-color: #f44336; } QPushButton:hover { background-color: #da190b; }")
+        
         StartRecod_layout = QtWidgets.QHBoxLayout()
         StartRecod_layout.addWidget(RecordStartBotton)
         StartRecod_layout.addWidget(RecordStopBotton)
-
-        FileName_lb = QtWidgets.QLabel('Save File Name:')  # 存储文件名设置
-        self.FileName_le = QtWidgets.QLineEdit()  # 文本输入框
-        self.FileName_le.setPlaceholderText('{}'.format("File Name"))  # 提示作用的文件名
-        FileName_layout = QtWidgets.QHBoxLayout()
+        record_group.setLayout(StartRecod_layout)
+        
+        # 文件名设置
+        file_group = QtWidgets.QGroupBox("文件设置")
+        file_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        FileName_lb = QtWidgets.QLabel('保存文件名:')
+        FileName_lb.setWordWrap(True)
+        self.FileName_le = QtWidgets.QLineEdit()
+        self.FileName_le.setPlaceholderText('输入文件名...')
+        self.FileName_le.setStyleSheet("QLineEdit { padding: 5px; border: 1px solid #ccc; border-radius: 3px; }")
+        self.FileName_le.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        
+        FileName_layout = QtWidgets.QVBoxLayout()
         FileName_layout.addWidget(FileName_lb)
         FileName_layout.addWidget(self.FileName_le)
-
-        OSR_lb = QtWidgets.QLabel('OSR')  # OSR设定下拉菜单
+        file_group.setLayout(FileName_layout)
+        
+        # 参数设置
+        params_group = QtWidgets.QGroupBox("采集参数")
+        params_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        params_layout = QtWidgets.QVBoxLayout()
+        
+        # OSR设置
+        OSR_lb = QtWidgets.QLabel('采样率 (OSR):')
+        OSR_lb.setWordWrap(True)
         self.OSR_cb = QtWidgets.QComboBox()
-        self.OSR_cb.addItems(osr_str)  # 添加OSR可选类型
-        self.OSR_cb.currentIndexChanged.connect(self.OSR_fun)  # 当列表选择发生变化，调用OSR_fun()函数
-        self.OSR_cb.setCurrentIndex(4)  # Default OSR_2048
-        OSR_layout = QtWidgets.QHBoxLayout()
-        OSR_layout.addWidget(OSR_lb)  # 添加label
-        OSR_layout.addWidget(self.OSR_cb)  # 添加下拉菜单
-
-        PGA_lb = QtWidgets.QLabel('PGA Gain')  # PGA设定下拉菜单，参见OSR设定
+        self.OSR_cb.addItems(osr_str)
+        self.OSR_cb.currentIndexChanged.connect(self.OSR_fun)
+        self.OSR_cb.setCurrentIndex(4)
+        self.OSR_cb.setStyleSheet("QComboBox { padding: 5px; border: 1px solid #ccc; border-radius: 3px; }")
+        self.OSR_cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        
+        # PGA设置
+        PGA_lb = QtWidgets.QLabel('放大增益 (PGA):')
+        PGA_lb.setWordWrap(True)
         self.PGA_cb = QtWidgets.QComboBox()
         self.PGA_cb.addItems(PGAGain)
         self.PGA_cb.currentIndexChanged.connect(self.PGA_fun)
-        self.PGA_cb.setCurrentIndex(2)  # Default PGA_GAIN_4
-        PGA_layout = QtWidgets.QHBoxLayout()
-        PGA_layout.addWidget(PGA_lb)
-        PGA_layout.addWidget(self.PGA_cb)
-
-        Filter_lb = QtWidgets.QLabel('Filter –3-dB')  # DCblock filter设定，参见OSR设定
+        self.PGA_cb.setCurrentIndex(2)
+        self.PGA_cb.setStyleSheet("QComboBox { padding: 5px; border: 1px solid #ccc; border-radius: 3px; }")
+        self.PGA_cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        
+        # 滤波器设置
+        Filter_lb = QtWidgets.QLabel('直流阻断滤波器:')
+        Filter_lb.setWordWrap(True)
         self.Filter_cb = QtWidgets.QComboBox()
         self.Filter_cb.addItems(DCBlockFilter)
         self.Filter_cb.currentIndexChanged.connect(self.Filter_fun)
-        self.Filter_cb.setCurrentIndex(4)  # Default 20.2 Hz
-        Filter_layout = QtWidgets.QHBoxLayout()
-        Filter_layout.addWidget(Filter_lb)
-        Filter_layout.addWidget(self.Filter_cb)
-
-        # Add control widgets to the left column (column 0)
-        layout.addLayout(Start_layout, 0, 0, 1, 1)
-        layout.addLayout(StartRecod_layout, 1, 0, 1, 1)
-        layout.addLayout(FileName_layout, 2, 0, 1, 1)
-        layout.addLayout(OSR_layout, 3, 0, 1, 1)
-        layout.addLayout(PGA_layout, 4, 0, 1, 1)
-        layout.addLayout(Filter_layout, 5, 0, 1, 1)
-        # Add a spacer to push control widgets to the top
-        layout.addItem(QtWidgets.QSpacerItem(20, 40, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding), 6,
-                       0)
+        self.Filter_cb.setCurrentIndex(4)
+        self.Filter_cb.setStyleSheet("QComboBox { padding: 5px; border: 1px solid #ccc; border-radius: 3px; }")
+        self.Filter_cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        
+        params_layout.addWidget(OSR_lb)
+        params_layout.addWidget(self.OSR_cb)
+        params_layout.addWidget(PGA_lb)
+        params_layout.addWidget(self.PGA_cb)
+        params_layout.addWidget(Filter_lb)
+        params_layout.addWidget(self.Filter_cb)
+        params_group.setLayout(params_layout)
+        
+        # 添加所有控件到控制面板
+        control_layout.addWidget(start_group)
+        control_layout.addWidget(record_group)
+        control_layout.addWidget(file_group)
+        control_layout.addWidget(params_group)
+        control_layout.addStretch()  # 添加弹性空间
+        
+        # 添加到主布局
+        layout.addWidget(control_panel, 0, 0, 1, 1)
 
         # --- Plotting Area ---
-        # Add the GraphicsLayoutWidget to the right column (column 1)
-        # It will span multiple rows to accommodate all plots
-        # The row span should be large enough to contain all node rows * number of plots per node row
-        # Number of plots per node column = 1 (EMG) + 3 (ACC) = 4
-        # Number of node rows = ceil(node_expected / NODE_COLS)
+        # 设置图表间距和样式
+        self.win.ci.layout.setHorizontalSpacing(15)  # 增加水平间距
+        self.win.ci.layout.setVerticalSpacing(8)     # 增加垂直间距
+        
+        # 计算布局参数 - 简化布局，移除复杂的分隔线
         num_node_rows = (node_expected + NODE_COLS - 1) // NODE_COLS
-        total_plot_rows_in_win = num_node_rows * 4  # 4 plots stacked per node in a column
+        # 简化布局：每个节点占4行（1个EMG + 3个ACC）
+        rows_per_node_group = 4
+        total_plot_rows_in_win = num_node_rows * rows_per_node_group
 
-        layout.addWidget(self.win, 0, 1, total_plot_rows_in_win, 1)  # Span calculated rows, 1 column in the main layout
+        layout.addWidget(self.win, 0, 1, total_plot_rows_in_win, 1)
 
-        # --- Dynamically create plots based on node_expected ---
-        self.plots = []  # List to hold PlotItem objects
-        self.curves = []  # List to hold PlotDataItem objects
+        # --- 动态创建图表（重写布局） ---
+        self.plots = []
+        self.curves = []
+        # 存储自定义轴标题文本对象，便于后续调整/清理
+        self.custom_axis_labels = []
 
-        # Create plots grouped by node
+        # 统一字体和样式（坐标轴数值字体调小、变细）
+        font = QtGui.QFont()
+        font.setFamily("Arial")
+        font.setPointSize(8)  # 坐标轴数值字体更小
+        font.setWeight(QtGui.QFont.Normal)  # 字体不加粗
+        axis_width = 28  # 更宽，保证竖排文字不重叠
+
+        # 自定义横排多行标签函数
+        def multiline_label(text, maxlen=7):
+            # 按maxlen分割为多行
+            lines = []
+            while len(text) > maxlen:
+                lines.append(text[:maxlen])
+                text = text[maxlen:]
+            lines.append(text)
+            return '\n'.join(lines)
+
         for i in range(node_expected):
-            # Calculate grid position within the GraphicsLayoutWidget
+            # 在node0和node2之间插入空白行（分界线效果）
+            if i == 2:
+                for col in range(NODE_COLS):
+                    spacer = self.win.addPlot(row=rows_per_node_group, col=col)
+                    spacer.hideAxis('left')
+                    spacer.hideAxis('bottom')
+                    spacer.hideAxis('right')
+                    spacer.hideAxis('top')
+                    spacer.setMouseEnabled(False, False)
+                    spacer.setMaximumHeight(10)  # 空出空间
+                    # spacer.setBackground(None)
             node_col = i % NODE_COLS
-            node_row_start = (i // NODE_COLS) * 4  # 4 rows per node (1 EMG + 3 ACC)
+            node_row_group = i // NODE_COLS
+            # 分界后第二组节点的base_row整体下移一行
+            base_row = node_row_group * rows_per_node_group
+            if i >= 2:
+                base_row += 1
 
-            # Add EMG plot for node i
-            emg_plot = self.win.addPlot(row=node_row_start, col=node_col)
-            emg_plot.setTitle(f'Node {i} EMG')
-            # Only show X axis label on the bottom-most plot of the node stack
-            if i // NODE_COLS == num_node_rows - 1 or NODE_COLS == 1 or i == node_expected - 1:
-                # Show axis label if it's the last row of node plots, or only one node column, or the very last node
-                # Let's simplify: only show on the absolute last row of plots
-                if node_row_start + 3 == total_plot_rows_in_win - 1:  # Check if the last plot row is the last plot overall
-                    emg_plot.setLabel('bottom', 'Samples')
-                else:
-                    # Remove X axis if not the last row of plots for this node column
-                    # This is tricky with mixed EMG/ACC x-ranges. Let's keep X-axis for now, but maybe hide labels.
-                    emg_plot.showAxis('bottom', show=True)  # Ensure axis is visible even without label
-                    # emg_plot.getAxis('bottom').setStyle(showValues=False) # Hide values, keep ticks?
-                    emg_plot.setLabel('bottom', '')  # Hide label
-            else:
-                emg_plot.setLabel('bottom', '')  # Hide label
-
-            # Only show Y axis label on plots in the first column
-            if node_col == 0:
-                emg_plot.setLabel('left', 'Value (ADC)')
-            else:
-                emg_plot.setLabel('left', '')  # Hide Y label for other columns
-
-            emg_plot.setYRange(-500000, 500000)  # Adjust Y range as needed
-            emg_plot.setXLink(
-                f'node{i}_x_axis')  # Link X axes within the node group - Use a unique name per node column
+            # === EMG 图表 ===
+            emg_row = base_row
+            emg_plot = self.win.addPlot(row=emg_row, col=node_col)
+            emg_plot.setTitle(f"Node{i}", color='black', size='14pt')  # 在上方添加节点编号
+            emg_plot.setYRange(-500000, 500000)
+            # 强制显示-500000和500000刻度在右侧坐标轴，并确保右轴可见
+            emg_plot.showAxis('right', True)
+            emg_plot.getAxis('right').setTicks([
+                [(-500000, '-500000'), (500000, '500000')],
+                [(0, '0')]
+            ])
+            emg_plot.getAxis('right').setStyle(showValues=True)
             emg_plot.setXRange(0, maxLen)
-            emg_curve = emg_plot.plot(pen='k')
+            emg_plot.setXLink('emg_x_axis')
+            emg_plot.showGrid(x=False, y=False)
+            emg_plot.getAxis('left').setTextPen('black')
+            emg_plot.getAxis('bottom').setTextPen('black')
+            emg_plot.getAxis('left').setTickFont(font)
+            emg_plot.getAxis('bottom').setTickFont(font)
+            emg_plot.getAxis('left').setWidth(axis_width)
+            emg_plot.getAxis('right').setWidth(axis_width)
+            # 恢复原生竖排轴标题
+            if node_col == 0 or node_col == NODE_COLS - 1:
+                emg_plot.setLabel('left', 'EMG', size='12pt', color='black', angle=0)
+                emg_plot.getAxis('left').setWidth(axis_width + 10)
+                emg_plot.getAxis('left').setStyle(showValues=True)
+            else:
+                emg_plot.setLabel('left', '', size='8pt', angle=0)
+                emg_plot.getAxis('left').setStyle(showValues=True)
+            # 显示底部横坐标数值
+            emg_plot.setLabel('bottom', '')
+            emg_plot.getAxis('bottom').setStyle(showValues=True)
+            emg_plot.setLabel('right', '', size='8pt')
+            emg_curve = emg_plot.plot(pen=pg.mkPen('b', width=1))
             self.plots.append(emg_plot)
             self.curves.append(emg_curve)
 
-            # Add ACC plots for node i (X, Y, Z)
+            # === ACC 图表 ===
             acc_axes = ['X', 'Y', 'Z']
-            for j in range(3):  # 3 ACC axes
-                acc_plot = self.win.addPlot(row=node_row_start + j + 1, col=node_col)  # +1 because ACC starts after EMG
-                acc_plot.setTitle(f'Node {i} Accel {acc_axes[j]}')
-
-                # Only show X axis label on the bottom-most plot of the node stack
-                # This will be the Accel Z plot for each node column
-                if j == 2:  # This is the Accel Z plot (the last one in the stack for this node)
-                    # Check if this is the actual last row of plots in the GLW
-                    if node_row_start + j + 1 == total_plot_rows_in_win - 1:
-                        acc_plot.setLabel('bottom', 'Samples')
-                    else:
-                        acc_plot.showAxis('bottom', show=True)
-                        acc_plot.setLabel('bottom', '')  # Hide label
-
-                else:  # Not the last plot in the node stack (AccX, AccY)
-                    acc_plot.setLabel('bottom', '')  # Hide X label
-
-                # Only show Y axis label on plots in the first column
-                if node_col == 0:
-                    acc_plot.setLabel('left', 'Value (g?)')
+            acc_colors = ['r', 'g', 'm']
+            for j, (axis, color) in enumerate(zip(acc_axes, acc_colors)):
+                acc_row = base_row + j + 1
+                acc_plot = self.win.addPlot(row=acc_row, col=node_col)
+                acc_plot.setYRange(-2, 2)
+                acc_plot.setXRange(0, maxLen_acc)
+                acc_plot.setXLink('acc_x_axis')
+                acc_plot.showGrid(x=False, y=False)
+                acc_plot.getAxis('left').setTextPen('black')
+                acc_plot.getAxis('bottom').setTextPen('black')
+                acc_plot.getAxis('left').setTickFont(font)
+                acc_plot.getAxis('bottom').setTickFont(font)
+                acc_plot.getAxis('left').setWidth(axis_width)
+                acc_plot.getAxis('right').setWidth(axis_width)
+                # 恢复原生竖排轴标题
+                if node_col == 0 or node_col == NODE_COLS - 1:
+                    acc_plot.setLabel('left', f'ACC {axis}', size='12pt', color='black', angle=0)
+                    acc_plot.getAxis('left').setWidth(axis_width + 10)
                 else:
-                    acc_plot.setLabel('left', '')  # Hide Y label for other columns
-
-                acc_plot.setYRange(-2, 2)  # Adjust Y range for acceleration (e.g., +/- 2g)
-                acc_plot.setXLink(f'node{i}_x_axis')  # Link X axes within the node group
-                acc_plot.setXRange(0, maxLen_acc)  # ACC X range might be different from EMG maxLen
-                acc_curve = acc_plot.plot(pen='k')
+                    acc_plot.setLabel('left', '', size='8pt', angle=0)
+                    acc_plot.getAxis('left').setStyle(showValues=False)
+                # 显示底部横坐标数值
+                acc_plot.setLabel('bottom', '')
+                acc_plot.getAxis('bottom').setStyle(showValues=True)
+                acc_plot.setLabel('right', '', size='8pt')
+                acc_curve = acc_plot.plot(pen=pg.mkPen(color, width=1))
                 self.plots.append(acc_plot)
                 self.curves.append(acc_curve)
 
+        self.win.setBackground('white')
+
+        # 设置主窗口布局
         self.setLayout(layout)
+        
+        # 设置窗口样式
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #ffffff;
+                font-family: Arial, sans-serif;
+            }
+            QGroupBox {
+                border: 2px solid #cccccc;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 10px 0 10px;
+            }
+        """)
 
         # --- Timer for Plot Updates ---
         # Define the number of new samples to consume from the data lists per update tick.
